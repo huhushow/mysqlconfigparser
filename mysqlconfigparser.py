@@ -1,10 +1,152 @@
 import configparser
+from collections.abc import MutableMapping
+from collections import ChainMap as _ChainMap
+import functools
+import io
+import itertools
+import os
+import re
+import sys
+import warnings
+from pprint import pprint
+import json
 
 
 class MysqlConfigParser(configparser.ConfigParser):
 
-    _redundunt_keys = {'mysqld': ['binlog-do-db', 'binlog-ignore-db']}
+    _multiple = {'mysqld': ['binlog-do-db', 'binlog-ignore-db', 'test']}
+
+    def test(self):
+        self._orig_strict = self._strict
+        self._strict = False
+        pprint([self._strict, self._orig_strict])
 
     def _read(self, fp, fpname):
-        super()._read(fp, fpname)
-        if self.has_section
+        """Parse a sectioned configuration file.
+        Each section in a configuration file contains a header, indicated by
+        a name in square brackets (`[]'), plus key/value options, indicated by
+        `name' and `value' delimited with a specific substring (`=' or `:' by
+        default).
+        Values can span multiple lines, as long as they are indented deeper
+        than the first line of the value. Depending on the parser's mode, blank
+        lines may be treated as parts of multiline values or ignored.
+        Configuration files may include comments, prefixed by specific
+        characters (`#' and `;' by default). Comments may appear on their own
+        in an otherwise empty line or may be entered in lines holding values or
+        section names.
+        if section/option is a redundunt key, append value to the option
+        """
+        elements_added = set()
+        cursect = None                        # None, or a dictionary
+        sectname = None
+        optname = None
+        lineno = 0
+        indent_level = 0
+        e = None                              # None, or an exception
+        for lineno, line in enumerate(fp, start=1):
+            comment_start = sys.maxsize
+            # strip inline comments
+            inline_prefixes = {p: -1 for p in self._inline_comment_prefixes}
+            while comment_start == sys.maxsize and inline_prefixes:
+                next_prefixes = {}
+                for prefix, index in inline_prefixes.items():
+                    index = line.find(prefix, index+1)
+                    if index == -1:
+                        continue
+                    next_prefixes[prefix] = index
+                    if index == 0 or (index > 0 and line[index-1].isspace()):
+                        comment_start = min(comment_start, index)
+                inline_prefixes = next_prefixes
+            # strip full line comments
+            for prefix in self._comment_prefixes:
+                if line.strip().startswith(prefix):
+                    comment_start = 0
+                    break
+            if comment_start == sys.maxsize:
+                comment_start = None
+            value = line[:comment_start].strip()
+            if not value:
+                if self._empty_lines_in_values:
+                    # add empty line to the value, but only if there was no
+                    # comment on the line
+                    if (comment_start is None and
+                        cursect is not None and
+                        optname and
+                        cursect[optname] is not None):
+                        cursect[optname].append('') # newlines added at join
+                else:
+                    # empty line marks end of value
+                    indent_level = sys.maxsize
+                continue
+            # continuation line?
+            first_nonspace = self.NONSPACECRE.search(line)
+            cur_indent_level = first_nonspace.start() if first_nonspace else 0
+            if (cursect is not None and optname and
+                cur_indent_level > indent_level):
+                cursect[optname].append(value)
+            # a section header or option header?
+            else:
+                indent_level = cur_indent_level
+                # is it a section header?
+                mo = self.SECTCRE.match(value)
+                if mo:
+                    sectname = mo.group('header')
+                    if sectname in self._sections:
+                        if self._strict and sectname in elements_added:
+                            raise DuplicateSectionError(
+                                    sectname, fpname, lineno)
+                        cursect = self._sections[sectname]
+                        elements_added.add(sectname)
+                    elif sectname == self.default_section:
+                        cursect = self._defaults
+                    else:
+                        cursect = self._dict()
+                        self._sections[sectname] = cursect
+                        self._proxies[sectname] = configparser.SectionProxy(
+                                self, sectname)
+                        elements_added.add(sectname)
+                    # So sections can't start with a continuation line
+                    optname = None
+                # no section header in the file?
+                elif cursect is None:
+                    raise MissingSectionHeaderError(fpname, lineno, line)
+                # an option line?
+                else:
+                    mo = self._optcre.match(value)
+                    if mo:
+                        optname, vi, optval = mo.group('option', 'vi', 'value')
+                        if not optname:
+                            e = self._handle_error(e, fpname, lineno, line)
+                        optname = self.optionxform(optname.rstrip())
+                        if (self._strict and
+                            (sectname, optname) in elements_added and
+                            (sectname not in self._multiple.keys() or
+                            optname not in self._multiple[sectname])):
+                            raise DuplicateOptionError(sectname, optname,
+                                                        fpname, lineno)
+                        elements_added.add((sectname, optname))
+                        # This check is fine because the OPTCRE cannot
+                        # match if it would set optval to None
+                        if optval is not None:
+                            optval = optval.strip()
+                            print(json.dumps(cursect, indent=4))
+                            if (sectname in self._multiple.keys() and
+                                optname in self._multiple[sectname] and
+                                optname in cursect and
+                                isinstance(cursect[optname], list)):
+                                cursect[optname].append(optval)
+                            else:
+                                cursect[optname] = [optval]
+                        else:
+                            # valueless option handling
+                            cursect[optname] = None
+                    else:
+                        # a non-fatal parsing error occurred. set up the
+                        # exception but keep going. the exception will be
+                        # raised at the end of the file and will contain a
+                        # list of all bogus lines
+                        e = self._handle_error(e, fpname, lineno, line)
+        self._join_multiline_values()
+        # if any parsing errors occurred, raise an exception
+        if e:
+            raise e

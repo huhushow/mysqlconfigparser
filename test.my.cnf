@@ -1,0 +1,6 @@
+[mysqld]
+test = testvalue
+test = test2
+test = test3
+test = test4
+test = test5
