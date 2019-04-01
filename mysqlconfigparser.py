@@ -11,15 +11,20 @@ import warnings
 from pprint import pprint
 import json
 
+_UNSET = object()
+
+
+class MysqlInterpolation(configparser.Interpolation):
+    def before_get(self, parser, section, option, value, defaults):
+        if section in parser._multiple and option in parser._multiple[section]:
+            return value.split('\n')
+        return value
+
 
 class MysqlConfigParser(configparser.ConfigParser):
 
     _multiple = {'mysqld': ['binlog-do-db', 'binlog-ignore-db', 'test']}
-
-    def test(self):
-        self._orig_strict = self._strict
-        self._strict = False
-        pprint([self._strict, self._orig_strict])
+    _DEFAULT_INTERPOLATION = MysqlInterpolation()
 
     def _read(self, fp, fpname):
         """Parse a sectioned configuration file.
@@ -70,10 +75,10 @@ class MysqlConfigParser(configparser.ConfigParser):
                     # add empty line to the value, but only if there was no
                     # comment on the line
                     if (comment_start is None and
-                        cursect is not None and
-                        optname and
-                        cursect[optname] is not None):
-                        cursect[optname].append('') # newlines added at join
+                            cursect is not None and
+                            optname and
+                            cursect[optname] is not None):
+                        cursect[optname].append('')  # newlines added at join
                 else:
                     # empty line marks end of value
                     indent_level = sys.maxsize
@@ -82,7 +87,7 @@ class MysqlConfigParser(configparser.ConfigParser):
             first_nonspace = self.NONSPACECRE.search(line)
             cur_indent_level = first_nonspace.start() if first_nonspace else 0
             if (cursect is not None and optname and
-                cur_indent_level > indent_level):
+                    cur_indent_level > indent_level):
                 cursect[optname].append(value)
             # a section header or option header?
             else:
@@ -109,7 +114,7 @@ class MysqlConfigParser(configparser.ConfigParser):
                     optname = None
                 # no section header in the file?
                 elif cursect is None:
-                    raise MissingSectionHeaderError(fpname, lineno, line)
+                    raise configparser.MissingSectionHeaderError(fpname, lineno, line)
                 # an option line?
                 else:
                     mo = self._optcre.match(value)
@@ -119,21 +124,21 @@ class MysqlConfigParser(configparser.ConfigParser):
                             e = self._handle_error(e, fpname, lineno, line)
                         optname = self.optionxform(optname.rstrip())
                         if (self._strict and
-                            (sectname, optname) in elements_added and
-                            (sectname not in self._multiple.keys() or
-                            optname not in self._multiple[sectname])):
-                            raise DuplicateOptionError(sectname, optname,
-                                                        fpname, lineno)
+                                (sectname, optname) in elements_added and
+                                (
+                                    sectname not in self._multiple.keys() or
+                                    optname not in self._multiple[sectname])):
+                            raise configparser.DuplicateOptionError(
+                                sectname, optname, fpname, lineno)
                         elements_added.add((sectname, optname))
                         # This check is fine because the OPTCRE cannot
                         # match if it would set optval to None
                         if optval is not None:
                             optval = optval.strip()
-                            print(json.dumps(cursect, indent=4))
                             if (sectname in self._multiple.keys() and
-                                optname in self._multiple[sectname] and
-                                optname in cursect and
-                                isinstance(cursect[optname], list)):
+                                    optname in self._multiple[sectname] and
+                                    optname in cursect and
+                                    isinstance(cursect[optname], list)):
                                 cursect[optname].append(optval)
                             else:
                                 cursect[optname] = [optval]
@@ -150,3 +155,4 @@ class MysqlConfigParser(configparser.ConfigParser):
         # if any parsing errors occurred, raise an exception
         if e:
             raise e
+
